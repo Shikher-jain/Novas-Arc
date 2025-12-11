@@ -6,4 +6,6 @@ tldextract
 sentence-transformers
 torch
 transformers
-# scikit-learn
+contractions
+
+# openai python-dotenv tenacity

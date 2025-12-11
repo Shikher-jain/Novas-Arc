@@ -5,13 +5,13 @@ import os
 import json
 import logging
 from bs4 import BeautifulSoup
-
 import contractions
-
 from urllib.parse import urljoin, urlparse, urldefrag
-
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tenacity import retry, stop_after_attempt, wait_exponential
+import unicodedata
+import difflib
 
 FAQ_KEYWORDS_IN_URL = [
     "faq", "faqs", "help", "support", "customer-service",
@@ -30,21 +30,46 @@ PLACEHOLDER_KEYWORDS = ["click here", "learn more", "more info", "link", "refere
 
 QUESTION_PATTERN = re.compile(r"\b(what|how|when|where|why|which|who|do|does|did|can|should|is|are|will|there|any)\b.*\?", re.I)
 
+# Threshold for fuzzy question deduplication (0..1). Lower => more aggressive merging.
+DEDUPE_THRESHOLD = 0.9
+
+# Add a configuration flag for deduplication mode
+DEDUPE_BY = "question"  # Options: "question" or "question+answer"
+MIN_ANSWER_LENGTH = 10  # Minimum length for answers after cleaning
+
 def clean_answer(text, all_questions):
+    """
+    Clean the answer text by removing repeated questions and unnecessary prefixes.
+    """
     if not text:
         return ""
-    
-    sentences = re.split(r'(?<=[.?!])\s+', text)  # split by sentence
+
+    # Remove common prefixes like "A:" or "Answer:"
+    text = re.sub(r"^\s*(A:|Answer:)\s*", "", text, flags=re.I)
+
+    # Split into sentences
+    sentences = re.split(r'(?<=[.?!])\s+', text)
     final = []
+
     for s in sentences:
         # Stop if this sentence looks like a new question
         if QUESTION_PATTERN.search(s):
             break
-        # Stop if sentence contains any known question explicitly
+
+        # Skip sentences that repeat any known question
         if any(q.lower() in s.lower() for q in all_questions):
-            break
+            continue
+
         final.append(s)
-    return " ".join(final).strip()
+
+    # Join the cleaned sentences
+    cleaned = " ".join(final).strip()
+
+    # Return empty if the cleaned answer is too short or equals the question
+    if len(cleaned) < MIN_ANSWER_LENGTH or any(cleaned.lower() == q.lower() for q in all_questions):
+        return ""
+
+    return cleaned
 
 def looks_like_question(text: str) -> bool:
     text = text.strip()
@@ -82,6 +107,7 @@ def save_faqs_jsonl(faqs, filename):
                 }    
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10))
 def fetch_url(url: str, timeout: int = 15) -> str:
     try:
         res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
@@ -101,8 +127,6 @@ def normalize_url(href: str, base: str) -> str:
     absolute, _ = urldefrag(absolute)  # remove (#fragment)
     return absolute
 
-def filter_links_by_keywords(links):
-    return [u for u in links if any(k in u.lower() for k in FAQ_KEYWORDS_IN_URL)]
 def remove_abb(text):
     return contractions.fix(text)
 
@@ -117,6 +141,12 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\s+\d+\.\s*$', '', text)  # removes trailing numbering like " 1."
     text = re.sub(r"^\s+|\s+$", "", text)  # removes leading and trailing whitespace
     text = re.sub(r"\[.*?\]", " ", text)  # removes [edit] etc.
+
+    # Remove non-ASCII characters
+    text = re.sub(r"[^\x00-\x7F]+", "", text)
+
+    # Normalize Unicode (e.g., accented characters to their base forms)
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     text = remove_abb(text)
 
     # Remove duplicate sentences
@@ -159,36 +189,51 @@ def extract_links(html: str, base_url: str):
         links.append(u)
 
     return list(dict.fromkeys(links))
-    # -----------------------------------------
-    # if not html:
-    #     return []
-    # soup = BeautifulSoup(html, "html.parser")
-    # links = []
-    # for a in soup.find_all("a", href=True):
-    #     u = normalize_url(a["href"], base_url)
-    #     if same_domain(u, base_url):
-    #         links.append(u)
-    # links = [u for u in links if not re.search(r"(\.pdf|\.jpg|\.png|\.gif|\.zip|\.mp4|\.css|\.js|\?.*utm|tracking)", u)]
-    # return list(dict.fromkeys(links))
 
-def deduplicate_faqs(faqs):
+def deduplicate_faqs(faqs, method):
+    """
+    Deduplicate FAQs by both question and answer using either exact matching or fuzzy matching.
+    """
     final_faqs = []
-    seen = set()
+    seen = []
+
     for f in faqs:
         q = clean_text(f.get("question", ""))
-        a = clean_text(f.get("answer", ""))
-        if len(q) < 5 or len(a) < 5:
+        a = clean_answer(f.get("answer", ""), [q])
+
+        # Skip if the question or answer is too short
+        if len(q) < 5 or len(a) < MIN_ANSWER_LENGTH:
             continue
 
-        # key = f"{q}|||{a}"
-        key = q.lower()  # deduplicate by question only
+        if method == "2":
+            # Fuzzy Matching
+            is_duplicate = False
+            for existing in seen:
+                existing_q = existing["question"]
+                existing_a = existing["answer"]
 
-        if key not in seen:
-            seen.add(key)
-            final_faqs.append({"question": q, "answer": clean_answer(a, [q])})
+                # Calculate similarity scores
+                question_similarity = difflib.SequenceMatcher(None, q, existing_q).ratio()
+                answer_similarity = difflib.SequenceMatcher(None, a, existing_a).ratio()
+
+                # Use DEDUPE_THRESHOLD to determine if it's a duplicate
+                if question_similarity >= DEDUPE_THRESHOLD and answer_similarity >= DEDUPE_THRESHOLD:
+                    is_duplicate = True
+                    break
+
+            if not is_duplicate:
+                seen.append({"question": q, "answer": a})
+                final_faqs.append({"question": q, "answer": a})
+        else:
+            # Exact Matching
+            key = (q.lower(), a.lower())
+            if key not in seen:
+                seen.append(key)
+                final_faqs.append({"question": q, "answer": a})
+
     return final_faqs
 
-def extract_faqs_from_html(html: str):
+def extract_faqs_from_html(html: str, page_url: str = ""):
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -223,12 +268,23 @@ def extract_faqs_from_html(html: str):
                         if q and ans:
                             faqs.append({
                                 "question": clean_text(q),
-                                "answer": clean_text(ans)
+                                "answer": clean_text(ans),
+                                "source": page_url
                             })
         except Exception:
             pass
 
-    # 2) <details>/<summary>
+    # 2) Accordion items (common in many sites)
+    for block in soup.find_all("div", class_=lambda x: x and ("accordion-item" in x or "accordion" in x.lower() or "itemExpander_module_expandableSection" in x)):
+        q_tag = block.find(["h2", "h3", "h4", "button"])
+        a_tag = block.find(["div", "section", "p", "ul", "ol", "article"])
+        if q_tag and a_tag:
+            q = clean_text(q_tag.get_text(" ", strip=True))
+            a = clean_text(a_tag.get_text(" ", strip=True))
+            if q and a:
+                faqs.append({"question": q, "answer": a, "source": page_url})
+
+    # 3) <details>/<summary>
     for det in soup.find_all("details"):
         summary = det.find("summary")
         if summary:
@@ -236,9 +292,9 @@ def extract_faqs_from_html(html: str):
             content = det.find_all(["p","div","section","article","ul","ol"])
             a = " ".join([clean_text(c.get_text(" ", strip=True)) for c in content]) if content else ""
             if q and (a or q.endswith("?")):
-                faqs.append({"question": q, "answer": a})
+                faqs.append({"question": q, "answer": a, "source": page_url})
 
-    # 3) <dl>/<dt>/<dd>
+    # 4) <dl>/<dt>/<dd>
     for dl in soup.find_all("dl"):
         for dt in dl.find_all("dt"):
             dd = dt.find_next_sibling("dd")
@@ -246,9 +302,9 @@ def extract_faqs_from_html(html: str):
                 q = dt.get_text(" ", strip=True)
                 a = dd.get_text(" ", strip=True)
                 if q and a:
-                    faqs.append({"question": q, "answer": a})
+                    faqs.append({"question": q, "answer": a, "source": page_url})
 
-    # 4) Headings
+    # 5) Headings
     for h in soup.find_all(["h2","h3","h4","button"]):
         qtxt = h.get_text(" ", strip=True)
         if not qtxt:
@@ -258,32 +314,7 @@ def extract_faqs_from_html(html: str):
             nxt = h.find_next_sibling(lambda tag: tag.name in ["p","div","section","article","ul","ol"])
             a = clean_text(nxt.get_text(" ", strip=True)) if nxt else ""
             if qtxt and a:
-                faqs.append({"question": qtxt, "answer": a})
-
-    # 4) Accordion items (common in many sites)
-    for block in soup.find_all("div", class_=lambda x: x and "accordion-item" in x):
-        q_tag = block.find(["h2","h3","h4","button"])
-        a_tag = block.find(["p","div","section","article","ul","ol"])
-
-        if q_tag and a_tag:
-            q = clean_text(q_tag.get_text(" ", strip=True))
-            a = clean_text(a_tag.get_text(" ", strip=True))
-
-            if q and a:
-                faqs.append({
-                    "question": q,
-                    "answer": a
-                })
-
-    # 5) Accordion style (common in AWS/Flipkart)
-    for block in soup.find_all("div", class_=lambda x: x and "accordion" in x.lower()):
-        q_tag = block.find(["h2","h3","h4","button"])
-        a_tag = block.find(["p","div","section","article","ul","ol"])
-        if q_tag and a_tag:
-            q = clean_text(q_tag.get_text(" ", strip=True))
-            a = clean_text(a_tag.get_text(" ", strip=True))
-            if q and a:
-                faqs.append({"question": q, "answer": a})
+                faqs.append({"question": qtxt, "answer": a, "source": page_url})
 
     # 6) Tables (Q in first <td>, A in second <td>)
     for tr in soup.find_all("tr"):
@@ -326,7 +357,7 @@ def extract_faqs_from_html(html: str):
             nxt = nxt.find_next_sibling()
         a = clean_text(answer_text)
         if q and a:
-            faqs.append({"question": q, "answer": a})
+            faqs.append({"question": q, "answer": a, "source": page_url})
 
     # 9) Flexible accordion handling (AWS/Flipkart/others)
     for block in soup.find_all("div", class_=lambda x: x and "accordion" in x.lower()):
@@ -336,7 +367,7 @@ def extract_faqs_from_html(html: str):
             q = clean_text(q_tag.get_text(" ", strip=True))
             a = clean_text(a_tag.get_text(" ", strip=True))
             if q and a:
-                faqs.append({"question": q, "answer": a})
+                faqs.append({"question": q, "answer": a, "source": page_url})
 
     # 10) Each topic is a section, e.g., <div id="topic-1"> ... </div>
     topics = soup.select("div.lb-grid")  
@@ -352,21 +383,7 @@ def extract_faqs_from_html(html: str):
                     answer_parts.append(clean_text(sib.get_text(" ", strip=True)))  
             answer = " ".join(answer_parts).strip()  
             if question and answer:  
-                faqs.append({"question": clean_text(question), "answer": clean_text(answer)})  
-
-    # 11) AWS Expandable Section FAQs
-    for block in soup.find_all("div", class_=lambda x: x and "itemExpander_module_expandableSection" in x):
-        q_tag = block.find(["h2", "h3", "button"])
-        a_tag = block.find("div", class_=lambda x: x and "itemExpander_module_expandableSectionContent" in x)
-        
-        if q_tag and a_tag:
-            q = clean_text(q_tag.get_text(" ", strip=True))
-            a = clean_text(a_tag.get_text(" ", strip=True))
-            if q and a:
-                faqs.append({"question": q, "answer": a})
-
-    # if q and a:
-    #     faqs.append({"question": clean_text(q), "answer": " ".join(clean_text(a))})
+                faqs.append({"question": clean_text(question), "answer": clean_text(answer), "source": page_url})  
 
     return deduplicate_faqs(faqs)
 
@@ -376,17 +393,12 @@ def process_page(url: str, base_url: str):
         return [], []
 
     # Extract FAQs from the page
-    faqs = extract_faqs_from_html(html)
+    faqs = extract_faqs_from_html(html, page_url=url)
 
     # Extract links from the page
     links = extract_links(html, base_url)
-    links = [u for u in links if same_domain(u, base_url)]
-    links = filter_links_by_keywords(links)
-
-    # Follow placeholder links inside answers
-    soup = BeautifulSoup(html, "html.parser")
     for f in faqs:
-        soup_ans = BeautifulSoup(f["answer"], "html.parser")
+        soup_ans = BeautifulSoup(f.get("answer", ""), "html.parser")
         for a_tag in soup_ans.find_all("a", href=True):
             u = normalize_url(a_tag["href"], base_url)
             if same_domain(u, base_url) and u not in links:
@@ -396,6 +408,7 @@ def process_page(url: str, base_url: str):
     links = list(dict.fromkeys(links))
 
     return links, faqs
+
 def crawl_site(root_url: str, max_depth: int, max_workers: int):
     base = root_url
     seen = set()
@@ -431,13 +444,13 @@ def crawl_site(root_url: str, max_depth: int, max_workers: int):
                     next_frontier.extend(links)
                 except Exception as e:
                     logging.warning(f"Failed processing {u}: {e}")
-                    pass
+                    # pass
 
         # Deduplicate next frontier
         frontier = list(dict.fromkeys([x for x in next_frontier if x not in seen and same_domain(x, base)]))
 
     # Deduplicate final FAQs by question + answer
-    all_faqs = deduplicate_faqs(all_faqs)
+    # all_faqs = deduplicate_faqs(all_faqs)
     return list(dict.fromkeys(all_urls)), all_faqs
 
 def main():
@@ -487,6 +500,15 @@ def main():
         min_len = 20
 
     filtered = [f for f in faqs if len(f["answer"]) >= min_len]
+
+    # Move deduplication method selection outside the function
+    logging.info("Choose deduplication method:")
+    logging.info("1. Exact Matching")
+    logging.info("2. Fuzzy Matching")
+    method = input("Enter 1 or 2 (default is 1): ").strip() or "1"
+
+    # Deduplicate across all pages
+    filtered = deduplicate_faqs(filtered, method)
 
     with open(qna_file, "w", encoding="utf-8") as f:
         for faq in filtered:

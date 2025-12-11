@@ -1,35 +1,76 @@
-import requests
-import time
-import re
+
 import os
+import re
+import time
 import json
 import logging
-from bs4 import BeautifulSoup
-
-import contractions
-
-from urllib.parse import urljoin, urlparse, urldefrag
-
+import random
+from typing import Dict, List, Tuple, Set, Any
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urljoin, urlparse, urldefrag
 
-FAQ_KEYWORDS_IN_URL = [
-    "faq", "faqs", "help", "support", "customer-service",
-    "knowledge", "knowledgebase", "kb", "guide",
-    "how-to", "howto", "troubleshoot", "troubleshooting",
-    "qna", "q&a", "questions", "getting-started", "contact-us"
-]
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from ratelimit import limits, sleep_and_retry
+from tqdm import tqdm
+from bs4 import BeautifulSoup
+import contractions
 
-FAQ_TEXT_HINTS = [
-    "faq", "frequently asked questions", "how do i", "how to",
-    "troubleshoot", "troubleshooting", "common questions",
-    "help center", "support", "customer service"
-]
+# ========== IMPORT SHARED CONFIGURATION ==========
+# Eliminates code duplication - all shared functions and configs imported from here
+from shared_config import (
+    TOPIC_TONE_MAP,
+    CONTEXTS,
+    advanced_system_prompt_generator
+)
 
-PLACEHOLDER_KEYWORDS = ["click here", "learn more", "more info", "link", "reference"]
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+"""
+Our next task is to train or fine-tune an OpenAI model with multiple contexts.
+Here, “different contexts” can refer to:
+- Different topics or domains – e.g., customer support, technical help, sales chat
+- Different personas or tones – e.g., friendly assistant, formal support agent
+- Different user intents – e.g., FAQ answering, booking assistance, product recommendations
+A single model can handle all these variations if it is trained or prompted correctly.
+"""
+
+# Constants and Configuration
+FAQ_KEYWORDS = {
+    "frequently", "faq", "faqs", "common questions", "help center",
+    "support", "knowledge base", "help", "asked questions"
+}
+
+FAQ_KEYWORDS_IN_URL = FAQ_KEYWORDS | {"help", "support", "faq", "knowledge"}
+
+
+FAQ_KEYWORDS = set([
+    keyword for context in CONTEXTS.values() 
+    for keyword in context["keywords"]
+] + ["faq", "faqs", "questions", "help", "support"])
 
 QUESTION_PATTERN = re.compile(r"\b(what|how|when|where|why|which|who|do|does|did|can|should|is|are|will|there|any)\b.*\?", re.I)
 
+
+# --- Simple context detection function ---
+def detect_context(url, html):
+    """
+    Detect context and system message based on URL and HTML content.
+    Returns (context, system_msg)
+    """
+    for key, val in CONTEXTS.items():
+        # Check keywords in URL
+        if any(k in url.lower() for k in val["keywords"]):
+            return key, val["system_msg"]
+        # Check keywords in HTML
+        if html and any(k in html.lower() for k in val["keywords"]):
+            return key, val["system_msg"]
+    # Default fallback
+    return "support", CONTEXTS["support"]["system_msg"]
 def clean_answer(text, all_questions):
     if not text:
         return ""
@@ -66,33 +107,65 @@ def looks_like_question(text: str) -> bool:
         )
     )
 
-def save_faqs_jsonl(faqs, filename):
+def save_faqs_jsonl(faqs, url, system_msg="You are a customer support assistant. Provide clear and helpful answers to customer questions."):
+    """
+    Save FAQs to a JSONL file.
+    The filename is derived from the domain name in the URL.
+    Each record follows the format:
+    {
+        "messages": [
+            {"role": "system", "content": "System message here"},
+            {"role": "user", "content": "User's question here"},
+            {"role": "assistant", "content": "Assistant's answer here"}
+        ]
+    }
+    """
+    # Extract domain name from the URL
+    domain = urlparse(url).netloc.replace(".", "_")
+    filename = f"{domain}.jsonl"
+
     with open(filename, "w", encoding="utf-8") as f:
         for faq in faqs:
-            q = faq.get("question", "").strip()
-            a = faq.get("answer", "").strip()
-            if q and a:
-            
-                record = {
-                    "messages": [
-                        {"role": "system", "content": "You are a helpful assistant."},
-                        {"role": "user", "content": q},
-                        {"role": "assistant", "content": a}
-                    ]
-                }    
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            record = {
+                "messages": [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": faq['question']},
+                    {"role": "assistant", "content": faq['answer']}
+                ]
+            }
+            f.write(json.dumps(record) + "\n")
 
-def fetch_url(url: str, timeout: int = 15) -> str:
+    logging.info(f"Saved FAQs to {filename}")
+
+def fetch_url(url:  str, timeout: int = 15) -> str:
+
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS"]
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    @sleep_and_retry
+    @limits(calls=5, period=1)  # 5 requests per second
+    def limited_get(url, **kwargs):
+        return session.get(url, **kwargs)
+
     try:
-        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+        res = limited_get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
         res.raise_for_status()
         ctype = res.headers.get("Content-Type", "").lower()
         if "text/html" not in ctype and not url.endswith((".html", ".htm", "/")):
-            return ""   
+            return ""
         return res.text
     except Exception as e:
         logging.warning(f"Failed to fetch {url}: {e}")
         return ""
+
 def same_domain(url: str, base: str) -> bool:
     return urlparse(url).netloc == urlparse(base).netloc
 
@@ -101,8 +174,6 @@ def normalize_url(href: str, base: str) -> str:
     absolute, _ = urldefrag(absolute)  # remove (#fragment)
     return absolute
 
-def filter_links_by_keywords(links):
-    return [u for u in links if any(k in u.lower() for k in FAQ_KEYWORDS_IN_URL)]
 def remove_abb(text):
     return contractions.fix(text)
 
@@ -159,17 +230,6 @@ def extract_links(html: str, base_url: str):
         links.append(u)
 
     return list(dict.fromkeys(links))
-    # -----------------------------------------
-    # if not html:
-    #     return []
-    # soup = BeautifulSoup(html, "html.parser")
-    # links = []
-    # for a in soup.find_all("a", href=True):
-    #     u = normalize_url(a["href"], base_url)
-    #     if same_domain(u, base_url):
-    #         links.append(u)
-    # links = [u for u in links if not re.search(r"(\.pdf|\.jpg|\.png|\.gif|\.zip|\.mp4|\.css|\.js|\?.*utm|tracking)", u)]
-    # return list(dict.fromkeys(links))
 
 def deduplicate_faqs(faqs):
     final_faqs = []
@@ -180,9 +240,8 @@ def deduplicate_faqs(faqs):
         if len(q) < 5 or len(a) < 5:
             continue
 
-        # key = f"{q}|||{a}"
-        key = q.lower()  # deduplicate by question only
-
+        # Deduplicate by both question and answer
+        key = (q.lower(), a.lower())
         if key not in seen:
             seen.add(key)
             final_faqs.append({"question": q, "answer": clean_answer(a, [q])})
@@ -228,7 +287,17 @@ def extract_faqs_from_html(html: str):
         except Exception:
             pass
 
-    # 2) <details>/<summary>
+    # 2) Accordion items (common in many sites)
+    for block in soup.find_all("div", class_=lambda x: x and ("accordion-item" in x or "accordion" in x.lower() or "itemExpander_module_expandableSection" in x)):
+        q_tag = block.find(["h2", "h3", "h4", "button"])
+        a_tag = block.find(["div", "section", "p", "ul", "ol", "article"])
+        if q_tag and a_tag:
+            q = clean_text(q_tag.get_text(" ", strip=True))
+            a = clean_text(a_tag.get_text(" ", strip=True))
+            if q and a:
+                faqs.append({"question": q, "answer": a})
+
+    # 3) <details>/<summary>
     for det in soup.find_all("details"):
         summary = det.find("summary")
         if summary:
@@ -238,7 +307,7 @@ def extract_faqs_from_html(html: str):
             if q and (a or q.endswith("?")):
                 faqs.append({"question": q, "answer": a})
 
-    # 3) <dl>/<dt>/<dd>
+    # 4) <dl>/<dt>/<dd>
     for dl in soup.find_all("dl"):
         for dt in dl.find_all("dt"):
             dd = dt.find_next_sibling("dd")
@@ -248,7 +317,7 @@ def extract_faqs_from_html(html: str):
                 if q and a:
                     faqs.append({"question": q, "answer": a})
 
-    # 4) Headings
+    # 5) Headings
     for h in soup.find_all(["h2","h3","h4","button"]):
         qtxt = h.get_text(" ", strip=True)
         if not qtxt:
@@ -259,31 +328,6 @@ def extract_faqs_from_html(html: str):
             a = clean_text(nxt.get_text(" ", strip=True)) if nxt else ""
             if qtxt and a:
                 faqs.append({"question": qtxt, "answer": a})
-
-    # 4) Accordion items (common in many sites)
-    for block in soup.find_all("div", class_=lambda x: x and "accordion-item" in x):
-        q_tag = block.find(["h2","h3","h4","button"])
-        a_tag = block.find(["p","div","section","article","ul","ol"])
-
-        if q_tag and a_tag:
-            q = clean_text(q_tag.get_text(" ", strip=True))
-            a = clean_text(a_tag.get_text(" ", strip=True))
-
-            if q and a:
-                faqs.append({
-                    "question": q,
-                    "answer": a
-                })
-
-    # 5) Accordion style (common in AWS/Flipkart)
-    for block in soup.find_all("div", class_=lambda x: x and "accordion" in x.lower()):
-        q_tag = block.find(["h2","h3","h4","button"])
-        a_tag = block.find(["p","div","section","article","ul","ol"])
-        if q_tag and a_tag:
-            q = clean_text(q_tag.get_text(" ", strip=True))
-            a = clean_text(a_tag.get_text(" ", strip=True))
-            if q and a:
-                faqs.append({"question": q, "answer": a})
 
     # 6) Tables (Q in first <td>, A in second <td>)
     for tr in soup.find_all("tr"):
@@ -354,17 +398,6 @@ def extract_faqs_from_html(html: str):
             if question and answer:  
                 faqs.append({"question": clean_text(question), "answer": clean_text(answer)})  
 
-    # 11) AWS Expandable Section FAQs
-    for block in soup.find_all("div", class_=lambda x: x and "itemExpander_module_expandableSection" in x):
-        q_tag = block.find(["h2", "h3", "button"])
-        a_tag = block.find("div", class_=lambda x: x and "itemExpander_module_expandableSectionContent" in x)
-        
-        if q_tag and a_tag:
-            q = clean_text(q_tag.get_text(" ", strip=True))
-            a = clean_text(a_tag.get_text(" ", strip=True))
-            if q and a:
-                faqs.append({"question": q, "answer": a})
-
     # if q and a:
     #     faqs.append({"question": clean_text(q), "answer": " ".join(clean_text(a))})
 
@@ -373,39 +406,39 @@ def extract_faqs_from_html(html: str):
 def process_page(url: str, base_url: str):
     html = fetch_url(url)
     if not html:
-        return [], []
-
+        return [], [], None, None
+    
     # Extract FAQs from the page
     faqs = extract_faqs_from_html(html)
-
+    
+    # Detect context using unified context detection
+    context, system_msg = detect_context(url, html)
+    
     # Extract links from the page
     links = extract_links(html, base_url)
-    links = [u for u in links if same_domain(u, base_url)]
-    links = filter_links_by_keywords(links)
-
-    # Follow placeholder links inside answers
-    soup = BeautifulSoup(html, "html.parser")
     for f in faqs:
-        soup_ans = BeautifulSoup(f["answer"], "html.parser")
+        soup_ans = BeautifulSoup(f.get("answer", ""), "html.parser")
         for a_tag in soup_ans.find_all("a", href=True):
             u = normalize_url(a_tag["href"], base_url)
             if same_domain(u, base_url) and u not in links:
                 links.append(u)
-
+    
     # Deduplicate links
     links = list(dict.fromkeys(links))
+    
+    return links, faqs, context, system_msg
 
-    return links, faqs
 def crawl_site(root_url: str, max_depth: int, max_workers: int):
     base = root_url
     seen = set()
     seen_lock = Lock()
     all_urls = []
     all_faqs = []
-
+    context_faqs = {}  # Dictionary to store FAQs by context
+    failed_urls = []
     frontier = [root_url]
 
-    for depth in range(max_depth + 1):
+    for depth in tqdm(range(max_depth + 1), desc="Crawl Depth"):
         if not frontier:
             break
 
@@ -422,47 +455,111 @@ def crawl_site(root_url: str, max_depth: int, max_workers: int):
         next_frontier = []
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             future_map = {ex.submit(process_page, u, base): u for u in this_batch}
-            for fut in as_completed(future_map):
+            for fut in tqdm(as_completed(future_map), total=len(this_batch), desc=f"Depth {depth}"):
                 u = future_map[fut]
                 try:
-                    links, faqs = fut.result()
+                    links, faqs, context, system_msg = fut.result()
                     all_urls.append(u)
                     all_faqs.extend(faqs)
+
+                    # Store FAQs by context
+                    if context not in context_faqs:
+                        context_faqs[context] = {"faqs": [], "system_msg": system_msg}
+                    context_faqs[context]["faqs"].extend(faqs)
+
                     next_frontier.extend(links)
                 except Exception as e:
                     logging.warning(f"Failed processing {u}: {e}")
-                    pass
+                    failed_urls.append(u)
 
         # Deduplicate next frontier
         frontier = list(dict.fromkeys([x for x in next_frontier if x not in seen and same_domain(x, base)]))
 
-    # Deduplicate final FAQs by question + answer
-    all_faqs = deduplicate_faqs(all_faqs)
-    return list(dict.fromkeys(all_urls)), all_faqs
+    # Save failed URLs for manual review
+    if failed_urls:
+        with open("failed_urls.txt", "w", encoding="utf-8") as f:
+            for url in failed_urls:
+                f.write(url + "\n")
+        logging.info(f"Saved {len(failed_urls)} failed URLs to failed_urls.txt")
 
+    return list(dict.fromkeys(all_urls)), all_faqs, context_faqs
+
+def get_site_name(url):
+    """
+    Extract a sanitized site name from the URL.
+    """
+    netloc = urlparse(url).netloc
+    return re.sub(r"[^\w]+", "_", netloc)
+
+def prepare_fine_tuning_data(context_faqs, output_folder="FineTuning"):
+    """
+    Prepare fine-tuning data for OpenAI models.
+    Saves JSONL files for each context with variations in tone and persona.
+    The filenames are based on the sanitized site name from the URL.
+    """
+    os.makedirs(output_folder, exist_ok=True)
+
+    for context, data in context_faqs.items():
+        faqs = data["faqs"]
+        system_msg = data["system_msg"]
+
+        # Extract site name from the first FAQ URL
+        if faqs and "url" in faqs[0]:
+            site_name = get_site_name(faqs[0]["url"])
+        else:
+            site_name = context  # Fallback to context name if no URL is available
+
+        output_file = os.path.join(output_folder, f"{site_name}.jsonl")
+
+        records = []
+        for faq in faqs:
+            record = {
+                "prompt": f"{system_msg}\nQ: {faq['question']}\nA:",
+                "completion": f" {faq['answer']}"
+            }
+            records.append(record)
+
+        # Save records to JSONL file
+        with open(output_file, "w", encoding="utf-8") as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+
+        logging.info(f"Saved fine-tuning data for site '{site_name}' to: {output_file}")
+
+def validate_input(prompt, valid_options=None, default=None):
+    """
+    Validate user input with optional valid options and default value.
+    """
+    while True:
+        user_input = input(prompt).strip()
+        if not user_input and default is not None:
+            return default
+        if valid_options and user_input not in valid_options:
+            print(f"Invalid input. Please choose from: {', '.join(valid_options)}")
+            continue
+        return user_input
+
+
+
+
+# Update the main function to include input validation and better logging
 def main():
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-    start_url = input("Enter URL: ")
+    # Instead of predefined sites, we'll use a single starting URL
+    start_url = input("Enter starting URL: ")
 
-    def get_site_name(url):
-        netloc = urlparse(url).netloc
-        return re.sub(r"[^\w]+", "_", netloc)
+    # Extract domain from start_url
+    domain = urlparse(start_url).netloc.replace(".", "_")
 
-    site_name = get_site_name(start_url)
-
-    qna_folder = "QnA"
     ft_folder = "FineTuning"
-    os.makedirs(qna_folder, exist_ok=True)
     os.makedirs(ft_folder, exist_ok=True)
 
-    qna_file = os.path.join(qna_folder, f"{site_name}.jsonl")
-    ft_file = os.path.join(ft_folder, f"{site_name}.jsonl")
-
-    if os.path.exists(qna_file) and os.path.exists(ft_file):
-        logging.info(f"FAQs already extracted for {start_url}.")
-        logging.info(f"Use existing files: {qna_file} and {ft_file}")
+    ft_file = os.path.join(ft_folder, f"{domain}.jsonl")
+    
+    if os.path.exists(ft_file):
+        logging.info("Multi-context FAQs already extracted.")
+        logging.info(f"Use existing file: {ft_file}")
         return
-
+        
     try:
         max_depth = int(input("Enter crawl depth (default 3): ") or 3)
     except ValueError:
@@ -470,32 +567,69 @@ def main():
     try:
         max_workers = int(input("Enter max workers (default 12): ") or 12)
     except ValueError:
-        max_workers = 12
-
-    logging.info("Running crawler...")
-    t0 = time.time()
-    urls, faqs = crawl_site(start_url, max_depth, max_workers)
-    dt = round(time.time() - t0, 2)
-
-    logging.info(f"Done in {dt} seconds")
-    logging.info(f"Crawled {len(urls)} pages")
-    logging.info(f"Extracted {len(faqs)} FAQs")
-
+        max_workers = 12        
     try:
         min_len = int(input("Min answer length (0-2000, default 20): ") or 20)
     except ValueError:
         min_len = 20
+        
+    logging.info(f"Running crawler for {start_url}...")
+    t0 = time.time()
+    try:
+        urls, all_faqs, context_faqs = crawl_site(start_url, max_depth, max_workers)
+    except Exception as e:
+        logging.error(f"Crawling failed: {e}")
+        return
+    dt = round(time.time() - t0, 2)
+    
+    logging.info(f"Done in {dt} seconds")
+    logging.info(f"Crawled {len(urls)} pages")
+    logging.info(f"Extracted {len(all_faqs)} FAQs")
+    # print(f"Detected {len(context_faqs)} different contexts: {', '.join(context_faqs.keys())}")
+    
+    # Save fine-tuning data for each context
+    all_records = []
+    
+    # ✅ USE GLOBAL advanced_system_prompt_generator for UNIQUE prompts per FAQ
+    logging.info("Generating advanced system prompts for each FAQ...")
+    
+    for context, data in context_faqs.items():
+        faqs = data["faqs"]
+        context_prompt_count = 0
+        
+        for faq in faqs:
+            q = faq.get("question", "").strip()
+            a = faq.get("answer", "").strip()
+            
+            if q and a and len(a) >= min_len:
+                # Generate UNIQUE system prompt using global advanced function
+                system_prompt = advanced_system_prompt_generator(q, a, context)
+                
+                record = {
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": q},
+                        {"role": "assistant", "content": a}
+                    ]
+                }
+                all_records.append(record)
+                context_prompt_count += 1
+        
+        logging.info(f"Processed {context_prompt_count} {context} FAQs with advanced prompts")
 
-    filtered = [f for f in faqs if len(f["answer"]) >= min_len]
-
-    with open(qna_file, "w", encoding="utf-8") as f:
-        for faq in filtered:
-            f.write(json.dumps(faq, ensure_ascii=False) + "\n")
-
-    save_faqs_jsonl(filtered, ft_file)
-
-    logging.info(f"Saved QnA FAQs : {qna_file}")
-    logging.info(f"Saved Fine-tuning FAQs : {ft_file}")
+    # Save combined fine-tuning data
+    try:
+        with open(ft_file, "w", encoding="utf-8") as f:
+            for record in all_records:
+                try:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                except Exception as e:
+                    logging.warning(f"Failed to write record: {e}")
+        logging.info(f"\nTotal extracted {len(all_faqs)} FAQs across all contexts")
+        logging.info(f"Saved fine-tuning data to: {ft_file}")
+        logging.info("\nJSONL file created successfully. You can use this file for fine-tuning in a separate process.")
+    except Exception as e:
+        logging.error(f"Failed to save fine-tuning data: {e}")
 
 if __name__ == "__main__":
     main()
