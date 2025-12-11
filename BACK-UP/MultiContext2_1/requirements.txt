@@ -1,0 +1,9 @@
+beautifulsoup4
+contractions
+nltk
+openai
+python-dotenv
+ratelimit
+requests
+tqdm
+urllib3

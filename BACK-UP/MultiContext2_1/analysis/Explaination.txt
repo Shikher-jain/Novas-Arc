@@ -1,0 +1,134 @@
+------------------------------------------------------------
+1. app2.py
+------------------------------------------------------------
+Purpose:
+- Extracts FAQs from websites and prepares high-quality training data for AI chatbot fine-tuning.
+
+Workflow:
+- Crawls specified websites or FAQ pages to collect Q&A pairs.
+- Uses Natural Language Processing (NLP) to clean and structure the data.
+- Tags each FAQ with domain (hospitality, education, technical, etc.), tone (welcoming, technical, etc.), and intent (support, information, etc.).
+- Outputs training data in OpenAI’s JSONL format, ready for model fine-tuning.
+
+Key Features:
+- Ensures each FAQ is properly categorized for adaptive chatbot training.
+- Maintains data integrity and avoids duplication.
+- Imports shared logic from shared_config.py for consistency.
+
+Common Questions:
+- Does it train the model? No, it only prepares the data.
+- Can it process any website? Yes, if the site structure is compatible.
+- Is the output ready for OpenAI? Yes, it produces JSONL files suitable for fine-tuning.
+
+------------------------------------------------------------
+2. check_and_tune.py
+------------------------------------------------------------
+Purpose:
+- Fine-tunes an OpenAI model using a selected training file and provides an interactive chatbot for validation.
+
+Workflow:
+- Loads a training file (JSONL) and uploads it to OpenAI for fine-tuning.
+- Monitors the fine-tuning job status (pending, validating_files, queued, running, succeeded, failed, cancelled).
+- Saves the resulting model ID for future use and reference.
+- Launches a chatbot that uses the fine-tuned model to answer user queries interactively.
+- Adapts responses based on domain, tone, and intent detected from the user’s message.
+
+Key Features:
+- Uses logging for clear status updates and error handling.
+- Reads/writes model IDs next to training files for easy management.
+- Imports shared logic for NLP, prompt generation, and analysis.
+- Supports domain-specific validation (hospitality, education, technical, etc.).
+
+Common Questions:
+- Does it support multiple models at once? No, it works with one model per session.
+- How do I know if fine-tuning succeeded? Status updates are logged; model ID is saved if successful.
+- Can I validate the chatbot before deploying? Yes, you can interactively test the model’s responses.
+
+------------------------------------------------------------
+3. t1.py
+------------------------------------------------------------
+Purpose:
+- Runs a multi-model ensemble chatbot, allowing you to query several fine-tuned models per turn and select the best response.
+
+Workflow:
+- Loads all available fine-tuned model IDs from the FineTuning/ folder.
+- For each user message, sends the query to multiple models in parallel using threads.
+- Scores and compares responses using keyword overlap and relevance.
+- Returns the best answer, with options to view all candidate responses.
+- Supports chat commands to control which/how many models are used per turn (/models, /use key1,key2, /k N, /all, /both, /exit).
+
+Key Features:
+- Ensemble approach: combines strengths of multiple models (hospitality, education, technical, etc.).
+- Parallel processing for speed and efficiency.
+- Advanced routing and scoring logic for best answer selection.
+- Highly flexible—ideal for benchmarking, hybrid support, or maximizing answer quality.
+
+Common Questions:
+- Does it generate training data? No, it only uses existing fine-tuned models.
+- Can I use all models at once? Yes, you can select any number of models per turn.
+- Is it more expensive? Yes, querying multiple models per turn increases API usage and cost.
+- How do I control which models are used? Use chat commands to select or limit models.
+
+------------------------------------------------------------
+4. shared_config.py
+------------------------------------------------------------
+Purpose:
+- Provides shared configuration, NLP tools, and utility functions for all scripts in the project.
+
+Workflow:
+- Defines key dictionaries for domain/tone/intent mapping (e.g., TOPIC_TONE_MAP, CONTEXTS).
+- Loads and configures the SentimentIntensityAnalyzer (SIA) for tone detection.
+- Implements advanced topic and tone detection functions for analyzing FAQ content.
+- Generates adaptive system prompts based on domain, tone, and persona.
+- Centralizes logic for persona expansion and prompt customization.
+
+Key Features:
+- Ensures consistent domain/tone/intent mapping across all scripts.
+- Reduces code duplication by providing reusable functions and configuration.
+- Supports advanced NLP analysis for better training data and chatbot responses.
+- Easy to update: changes here propagate to all dependent scripts.
+
+Common Questions:
+- Is it required for all scripts? Yes, it is imported by app2.py, check_and_tune.py, and t1.py.
+- Can I customize tone/persona mappings? Yes, update the dictionaries and functions in shared_config.py.
+- Does it handle model training? No, it only provides configuration and utility functions.
+
+------------------------------------------------------------
+General Workflow & Relationships
+------------------------------------------------------------
+1. shared_config.py → Provides shared logic and configuration for all scripts.
+2. app2.py → Extracts and prepares training data.
+3. generate_training_data.py (optional) → Further refines or generates domain/tone/intent-specific datasets.
+4. check_and_tune.py → Fine-tunes a model and validates it interactively.
+5. t1.py → Runs a multi-model chatbot using all available fine-tuned models.
+
+------------------------------------------------------------
+Best Practices & Recommendations
+------------------------------------------------------------
+- Data Integrity: Ensure each training file contains only relevant domain data (e.g., education FAQs in education_training.jsonl).
+- Prompt Quality: Use domain-specific, professional system prompts for best results.
+- Model Management: Save model IDs next to their training files for easy reuse.
+- Cost Control: Use ensemble mode (t1.py) judiciously, as it increases API usage.
+- Customization: You can tailor tone, persona, and domain mappings in shared_config.py for your business needs.
+
+------------------------------------------------------------
+Summary Table
+------------------------------------------------------------
+| File             | Main Function                       | Who Should Use It         |
+|------------------|-------------------------------------|---------------------------|
+| app2.py          | FAQ extraction & training data prep | Data team, analysts       |
+| check_and_tune.py| Fine-tune & validate single model   | ML engineers, QA, support |
+| t1.py            | Multi-model ensemble chatbot        | Advanced users, R&D       |
+| shared_config.py | Shared config & NLP utilities       | All developers            |
+
+------------------------------------------------------------
+
+
+Short Explaination
+------------------------------------------------------------
+- app2.py: “This script extracts FAQs from websites and prepares the training data for our AI chatbot. It ensures each answer is tagged with the right business domain, communication style, and user intent.”
+- check_and_tune.py: “This script fine-tunes our chatbot model using the prepared data and lets us test its responses interactively. It’s ideal for validating a single domain-specific model.”
+- t1.py: “This advanced script lets us query multiple fine-tuned models at once, compare their answers, and select the best. It’s powerful for benchmarking and hybrid support, but uses more resources.”
+- shared_config.py: “This module provides all the shared configuration, NLP tools, and prompt logic for the project. It keeps our code DRY, consistent, and easy to maintain.”
+
+------------------------------------------------------------
