@@ -1,0 +1,127 @@
+------------------------------------------------------------
+MultiContext2: Unified Workflow & File Relationships
+------------------------------------------------------------
+
+1. shared_config.py
+------------------------------------------------------------
+Purpose:
+- Centralizes all shared configuration, NLP tools, and utility functions for FAQ extraction and chatbot systems.
+- Ensures consistent domain/tone/intent/persona mapping and prompt logic across all scripts.
+
+Workflow:
+- Defines key dictionaries for domain/tone/intent mapping (TOPIC_TONE_MAP, CONTEXTS).
+- Loads and configures sentiment analysis for tone detection.
+- Implements advanced topic, tone, and persona detection functions.
+- Generates adaptive system prompts for chatbots and training data.
+- Provides reusable functions for analysis, prompt generation, and persona expansion.
+
+Key Features:
+- Reduces code duplication and keeps logic consistent.
+- Easy to update: changes propagate to all dependent scripts.
+- Supports advanced NLP analysis for better training data and chatbot responses.
+- Optionally logs analysis results for traceability.
+
+------------------------------------------------------------
+2. app2.py
+------------------------------------------------------------
+Purpose:
+- Extracts FAQs from websites and prepares high-quality training data for AI chatbot fine-tuning.
+- Saves all extracted FAQ data as domain-specific JSONL files in the FineTuning folder (e.g., FineTuning/education_training.jsonl).
+
+Workflow:
+- Crawls specified websites or FAQ pages to collect Q&A pairs.
+- Uses NLP to clean and structure the data.
+- Tags each FAQ with domain, tone, intent, and persona using shared_config.py.
+- Outputs training data in OpenAI’s JSONL format, ready for model fine-tuning.
+- Saves all processed FAQ data to the FineTuning folder for auditing and debugging.
+
+Key Features:
+- Ensures each FAQ is properly categorized for adaptive chatbot training.
+- Maintains data integrity and avoids duplication.
+- Imports shared logic for consistency.
+- Output pipeline: all extracted data is saved in FineTuning/<domain>.jsonl for review and fine-tuning.
+
+------------------------------------------------------------
+3. check_and_tune.py
+------------------------------------------------------------
+Purpose:
+- Fine-tunes an OpenAI model using a selected training file and provides an interactive chatbot for validation.
+- Saves fine-tuned model IDs and related artifacts in the FineTuning folder, next to the training file.
+
+Workflow:
+- Loads a training file (JSONL) from the FineTuning folder and uploads it to OpenAI for fine-tuning.
+- Monitors the fine-tuning job status.
+- Saves the resulting model ID for future use and reference in the FineTuning folder.
+- Launches a chatbot that uses the fine-tuned model to answer user queries interactively.
+- Adapts responses based on domain, tone, intent, and persona detected from the user’s message.
+- Saves all fine-tuning and validation steps to the FineTuning folder for auditing and debugging.
+
+Key Features:
+- Uses logging for clear status updates and error handling.
+- Reads/writes model IDs next to training files for easy management.
+- Imports shared logic for NLP, prompt generation, and analysis.
+- Supports domain-specific validation and adaptive prompt logic.
+- Output pipeline: all model IDs and fine-tuning artifacts are saved in FineTuning for traceability.
+
+------------------------------------------------------------
+4. multimodel.py & multimodel_domain.py
+------------------------------------------------------------
+Purpose:
+- Runs a multi-model ensemble chatbot, allowing you to query several fine-tuned models per turn and select the best response.
+- The domain variant adds advanced context mapping and industry/touchpoint logic.
+- Logs each chat turn, model responses, and accuracy scores to analysis/chatbot_logs.jsonl.
+
+Workflow:
+- Loads all available fine-tuned model IDs from the FineTuning/ folder.
+- For each user message, sends the query to multiple models in parallel using threads.
+- Scores and compares responses using keyword overlap and relevance.
+- Returns the best answer, with options to view all candidate responses.
+- Supports chat commands to control which/how many models are used per turn.
+- Logs each chat turn and model scoring to the analysis/ folder.
+- Adapts responses to domain, tone, intent, industry, platform, and touchpoint.
+
+Key Features:
+- Ensemble approach: combines strengths of multiple models (hospitality, education, technical, etc.).
+- Parallel processing for speed and efficiency.
+- Advanced routing and scoring logic for best answer selection.
+- Highly flexible—ideal for benchmarking, hybrid support, or maximizing answer quality.
+- Analysis pipeline: logs all chatbot interactions and scoring.
+
+------------------------------------------------------------
+General Workflow & Relationships
+------------------------------------------------------------
+1. shared_config.py → Provides shared logic and configuration for all scripts.
+2. app2.py → Extracts and prepares training data, logs to analysis/faqs_extracted.jsonl.
+3. check_and_tune.py → Fine-tunes a model and validates it interactively, logs to analysis/training_validation.log.
+4. multimodel.py & multimodel_domain.py → Runs a multi-model chatbot, logs to analysis/chatbot_logs.jsonl.
+
+------------------------------------------------------------
+Best Practices & Recommendations
+------------------------------------------------------------
+- Data Integrity: Ensure each training file contains only relevant domain data.
+- Prompt Quality: Use domain-specific, professional system prompts for best results.
+- Model Management: Save model IDs next to their training files for easy reuse.
+- Cost Control: Use ensemble mode judiciously, as it increases API usage.
+- Customization: Tailor tone, persona, and domain mappings in shared_config.py for your business needs.
+- Analysis: Review logs in the analysis/ folder for debugging, auditing, and improvement.
+
+------------------------------------------------------------
+Summary Table
+------------------------------------------------------------
+| File                  | Main Function                       | Analysis Output File                | Who Should Use It         |
+|-----------------------|-------------------------------------|-------------------------------------|---------------------------|
+| app2.py               | FAQ extraction & training data prep | analysis/faqs_extracted.jsonl       | Data team, analysts       |
+| check_and_tune.py     | Fine-tune & validate single model   | analysis/training_validation.log    | ML engineers, QA, support |
+| multimodel.py         | Multi-model ensemble chatbot        | analysis/chatbot_logs.jsonl         | Advanced users, R&D       |
+| multimodel_domain.py  | Advanced domain/tone/intent/industry| analysis/chatbot_logs.jsonl         | Advanced users, R&D       |
+| shared_config.py      | Shared config & NLP utilities       | analysis/analysis_result.jsonl      | All developers            |
+
+------------------------------------------------------------
+Short Explanation
+------------------------------------------------------------
+- app2.py: “Extracts FAQs from websites and prepares training data for the AI chatbot, tagging each answer with domain, tone, intent, and persona.”
+- check_and_tune.py: “Fine-tunes the chatbot model using prepared data and lets you test responses interactively. Ideal for validating a single domain-specific model.”
+- multimodel.py & multimodel_domain.py: “Lets you query multiple fine-tuned models at once, compare answers, and select the best. Powerful for benchmarking and hybrid support.”
+- shared_config.py: “Provides all shared configuration, NLP tools, and prompt logic for the project. Keeps code DRY, consistent, and easy to maintain.”
+
+------------------------------------------------------------

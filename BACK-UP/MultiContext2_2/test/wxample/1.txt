@@ -1,0 +1,20 @@
+You: what is rentomojo?
+Batches: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 55.44it/s]
+Batches: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 77.77it/s] 
+Batches: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 10.58it/s]
+--------------------------------------------------------------------------------
+Rentomojo is a rental subscription platform that offers a wide range of products across categories such as furniture, appliances, electronics, and bikes. The platform provides a convenient and affordable alternative to purchasing products outright. Rentomojo offers a variety of benefits to its customers, including:
+
+* **Flexibility**: Rentomojo offers flexible rental plans that allow customers to rent products for as long as they need them. Customers can choose from a range of subscription plans based on their requirements.
+
+* **Affordability**: Rentomojo's rental plans are designed to be cost-effective, making it easy for customers to access high-quality products without the need for a large upfront investment.     
+
+* **Convenience**: Rentomojo offers a hassle-free rental experience, with free delivery, installation, and maintenance services. Customers can also easily exchange or return products if they no longer need them.
+
+* **Quality**: Rentomojo offers a curated selection of products from top brands, ensuring that customers have access to high-quality products that meet their needs.
+
+* **Sustainability**: Rentomojo's rental model promotes sustainability by reducing the need for customers to purchase products that they may only need for a limited period. This helps to reduce waste and minimize the environmental impact of consumer goods.
+
+Rentomojo's platform is designed to provide a seamless rental experience for customers, with an easy-to-use interface that allows customers to browse products, select rental plans, and manage their subscriptions online. Customers can also access customer support services through the platform to address any queries or issues they may have.
+
+Overall, Rentomojo offers a convenient, affordable, and sustainable alternative to traditional retail models, allowing customers to access high-quality products without the need for a large upfront investment.
